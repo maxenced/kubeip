@@ -1,0 +1,86 @@
+name: ghcr image
+
+# Builds the agent image from any ref of this fork and publishes it to the
+# GitHub container registry of the repository owner. Meant for running a fix
+# in production while it waits for an upstream release; the workflow itself
+# lives on its own branch so the fix branches stay clean.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to build
+        required: true
+        default: fix/gcp-dead-connection-detection
+  push:
+    branches:
+      - ci/ghcr-image
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  BUILD_REF: ${{ inputs.ref || 'fix/gcp-dead-connection-detection' }}
+  IMAGE: ghcr.io/${{ github.repository_owner }}/kubeip-agent
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.BUILD_REF }}
+
+      - name: setup go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.9
+
+      - name: test
+        env:
+          CGO_ENABLED: 0
+        run: go test ./...
+
+      - name: describe build
+        id: build
+        run: |
+          sha="$(git rev-parse --short HEAD)"
+          # image tags only allow [A-Za-z0-9_.-]; a branch name such as fix/foo becomes fix-foo
+          ref_tag="$(printf '%s' "$BUILD_REF" | tr -c 'A-Za-z0-9_.\n-' '-')"
+          image="$(printf '%s' "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "sha=$sha"
+            echo "ref_tag=$ref_tag"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: set up Docker buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: login to GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ steps.build.outputs.ref_tag }}-${{ steps.build.outputs.sha }}
+            COMMIT=${{ steps.build.outputs.sha }}
+            BRANCH=${{ env.BUILD_REF }}
+          tags: |
+            ${{ steps.build.outputs.image }}:${{ steps.build.outputs.ref_tag }}
+            ${{ steps.build.outputs.image }}:sha-${{ steps.build.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.build.outputs.sha }}
+            org.opencontainers.image.title=kubeip-agent
+            org.opencontainers.image.description=kubeip agent built from ${{ env.BUILD_REF }}
